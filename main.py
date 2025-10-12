@@ -73,7 +73,6 @@ COACH_PROMPT = """
 DB_FILE = "analytics.db"
 
 def init_db():
-    """Инициализирует базу данных и создает таблицу, если ее нет."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -88,7 +87,6 @@ def init_db():
     conn.close()
 
 def log_event(user_id: int, event_type: str):
-    """Записывает событие в базу данных."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     timestamp = datetime.utcnow()
@@ -130,6 +128,42 @@ async def stop_session(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Сессия завершена. Чтобы начать заново, нажмите /start.")
 
+# ↓↓↓ ИСПРАВЛЕНИЕ: ПЕРЕМЕЩАЕМ ОБРАБОТЧИК /stats ВЫШЕ, ЧТОБЫ ОН ИМЕЛ ПРИОРИТЕТ ↓↓↓
+@dp.message(Command("stats"))
+async def get_stats(message: Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        await message.answer("У вас нет доступа к этой команде.")
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM analytics WHERE event_type = 'start_command'")
+    start_users = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM analytics")
+    total_users = cursor.fetchone()[0]
+
+    cursor.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT user_id FROM analytics 
+            WHERE event_type = 'message_sent' 
+            GROUP BY user_id 
+            HAVING COUNT(*) > 5
+        )
+    """)
+    active_users = cursor.fetchone()[0]
+
+    conn.close()
+
+    stats_text = (
+        "📊 **Статистика бота**\n\n"
+        f"▫️ **Нажали /start:** {start_users} чел.\n"
+        f"▫️ **Всего уникальных пользователей:** {total_users} чел.\n"
+        f"▫️ **Активные (более 5 сообщений):** {active_users} чел."
+    )
+    await message.answer(stats_text, parse_mode="Markdown")
+
 @dp.callback_query(F.data == "agree_pressed")
 async def handle_agree(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_reply_markup()
@@ -168,3 +202,61 @@ async def handle_session_message(message: Message, state: FSMContext):
             await message.answer("Произошла ошибка. Пожалуйста, начните заново с команды /start.")
             await state.clear()
             return
+        messages_history.append({"role": "system", "content": system_prompt})
+
+    messages_history.append({"role": "user", "content": message.text})
+
+    thinking_message = await message.answer("Думаю... 🤔")
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages_history,
+            temperature=0.75,
+            max_tokens=500,
+        )
+        gpt_answer = response.choices[0].message.content
+
+        messages_history.append({"role": "assistant", "content": gpt_answer})
+        await state.update_data(messages=messages_history)
+        await state.set_state(UserState.in_session)
+        await thinking_message.edit_text(gpt_answer)
+
+    except Exception as e:
+        print(f"Ошибка при вызове OpenAI API: {e}")
+        logging.error(f"Ошибка при вызове OpenAI API: {e}")
+        await thinking_message.edit_text("Произошла ошибка. Пожалуйста, попробуйте еще раз позже или завершите сессию командой /stop.")
+
+@dp.message()
+async def handle_other_messages(message: Message):
+    await message.answer("Чтобы начать, пожалуйста, используйте команду /start.")
+
+# --- Функции для запуска и остановки вебхука ---
+async def on_startup(bot: Bot) -> None:
+    webhook_url_from_env = os.getenv("WEBHOOK_URL")
+    if webhook_url_from_env:
+        await bot.set_webhook(f"{webhook_url_from_env}/webhook")
+    else:
+        logging.warning("WEBHOOK_URL не установлен, бот не будет работать на сервере.")
+
+async def on_shutdown(bot: Bot) -> None:
+    await bot.delete_webhook()
+
+def main() -> None:
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
+    app = web.Application()
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
+    webhook_requests_handler.register(app, path="/webhook")
+    setup_application(app, dp, bot=bot)
+    
+    web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
+
+if __name__ == "__main__":
+    init_db()
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+    main()
