@@ -187,7 +187,7 @@ async def offer_payment_dummy(callback_query: types.CallbackQuery, state: FSMCon
     await callback_query.answer()
     await state.clear()
 
-# --- Функции для запуска и остановки вебхука ---
+# --- ФУНКЦИИ ДЛЯ ЗАПУСКА И ОСТАНОВКИ (ИСПРАВЛЕННЫЙ БЛОК) ---
 async def on_startup(bot: Bot) -> None:
     webhook_url_from_env = os.getenv("WEBHOOK_URL")
     if webhook_url_from_env:
