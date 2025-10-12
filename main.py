@@ -8,7 +8,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter # <-- ДОБАВЛЕН StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -123,13 +123,12 @@ async def send_welcome(message: Message, state: FSMContext):
     )
     await message.answer(welcome_text, reply_markup=agree_keyboard, parse_mode="Markdown")
 
-@dp.message(Command("stop"))
+@dp.message(Command("stop"), StateFilter("*")) # Добавляем StateFilter, чтобы команда работала всегда
 async def stop_session(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Сессия завершена. Чтобы начать заново, нажмите /start.")
 
-# ↓↓↓ ИСПРАВЛЕНИЕ: ПЕРЕМЕЩАЕМ ОБРАБОТЧИК /stats ВЫШЕ, ЧТОБЫ ОН ИМЕЛ ПРИОРИТЕТ ↓↓↓
-@dp.message(Command("stats"))
+@dp.message(Command("stats"), StateFilter("*")) # <-- ИСПРАВЛЕНИЕ: Добавляем StateFilter("*")
 async def get_stats(message: Message):
     if str(message.from_user.id) != ADMIN_ID:
         await message.answer("У вас нет доступа к этой команде.")
