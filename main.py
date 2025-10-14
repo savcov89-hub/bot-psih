@@ -160,9 +160,18 @@ def get_stats_for_period(date_filter: str):
         )
     """)
     active_users = cursor.fetchone()[0]
+
+    cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM analytics WHERE event_type = 'first_payment' {date_filter.replace('WHERE', 'AND') if date_filter else ''}")
+    first_payment_users = cursor.fetchone()[0]
+
+    cursor.execute(f"SELECT COUNT(*) FROM analytics WHERE event_type = 'recurring_payment' {date_filter.replace('WHERE', 'AND') if date_filter else ''}")
+    recurring_payments = cursor.fetchone()[0]
     
     conn.close()
-    return {"start": start_users, "total": total_users, "active": active_users}
+    return {
+        "start": start_users, "total": total_users, "active": active_users,
+        "first_payment": first_payment_users, "recurring": recurring_payments
+    }
 
 def format_change(current, previous):
     """Форматирует абсолютное и процентное изменение между двумя числами."""
@@ -280,7 +289,9 @@ async def handle_stats_period(callback_query: types.CallbackQuery):
             f"📊 **Статистика бота {period_text_map[period]}**\n\n"
             f"▫️ **Нажали /start:** {stats['start']} чел.\n"
             f"▫️ **Всего уникальных:** {stats['total']} чел.\n"
-            f"▫️ **Активные (> 5):** {stats['active']} чел."
+            f"▫️ **Активные (> 5 сообщ.):** {stats['active']} чел.\n\n"
+            f"💳 **Оплатили впервые:** {stats['first_payment']} чел.\n"
+            f"🔁 **Повторные оплаты:** {stats['recurring']}"
         )
     
     elif period in ["compare7d", "compare30d"]:
@@ -297,7 +308,9 @@ async def handle_stats_period(callback_query: types.CallbackQuery):
             f"_(Последние {days} vs. Предыдущие {days})_\n\n"
             f"▫️ **Нажали /start:** {current_stats['start']} (vs {previous_stats['start']}){format_change(current_stats['start'], previous_stats['start'])}\n"
             f"▫️ **Всего уникальных:** {current_stats['total']} (vs {previous_stats['total']}){format_change(current_stats['total'], previous_stats['total'])}\n"
-            f"▫️ **Активные (> 5):** {current_stats['active']} (vs {previous_stats['active']}){format_change(current_stats['active'], previous_stats['active'])}"
+            f"▫️ **Активные (> 5):** {current_stats['active']} (vs {previous_stats['active']}){format_change(current_stats['active'], previous_stats['active'])}\n\n"
+            f"💳 **Оплатили впервые:** {current_stats['first_payment']} (vs {previous_stats['first_payment']}){format_change(current_stats['first_payment'], previous_stats['first_payment'])}\n"
+            f"🔁 **Повторные оплаты:** {current_stats['recurring']} (vs {previous_stats['recurring']}){format_change(current_stats['recurring'], previous_stats['recurring'])}"
         )
     
     if stats_text:
@@ -364,30 +377,35 @@ async def start_survey(callback_query: types.CallbackQuery, state: FSMContext):
 
 @dp.message(UserJourney.survey_q1)
 async def process_survey_q1(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q1=message.text)
     await message.answer("**2. Какого результата вы хотели бы достичь в идеале? Что должно измениться?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q2)
 
 @dp.message(UserJourney.survey_q2)
 async def process_survey_q2(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q2=message.text)
     await message.answer("**3. Как вы думаете, что вам больше всего мешает достичь этого результата?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q3)
 
 @dp.message(UserJourney.survey_q3)
 async def process_survey_q3(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q3=message.text)
     await message.answer("**4. Что вы уже пробовали делать для решения этой проблемы?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q4)
 
 @dp.message(UserJourney.survey_q4)
 async def process_survey_q4(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q4=message.text)
     await message.answer("**5. Как эта проблема проявляется в вашем поведении? (например, 'избегаю общения', 'откладываю дела')**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q5)
 
 @dp.message(UserJourney.survey_q5)
 async def process_survey_q5_and_generate_plan(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q5=message.text)
     user_data = await state.get_data()
     
@@ -438,7 +456,7 @@ async def offer_payment(callback_query: types.CallbackQuery, state: FSMContext):
         "confirmation": {"type": "redirect", "return_url": f"https://t.me/{(await bot.get_me()).username}"},
         "capture": True,
         "description": "Подписка на 7 дней (с автопродлением)",
-        "save_payment_method": False,
+        "save_payment_method": True,
         "metadata": {"user_id": callback_query.from_user.id, "duration_days": 7}
     }, uuid.uuid4())
     
@@ -462,6 +480,13 @@ async def yookassa_webhook_handler(request):
 
         if payment and payment.get('status') == 'succeeded' and payment.get('paid'):
             user_id = int(payment['metadata']['user_id'])
+            
+            is_already_subscribed = await is_user_subscribed(user_id)
+            if not is_already_subscribed:
+                log_event(user_id, 'first_payment')
+            else:
+                log_event(user_id, 'recurring_payment')
+            
             duration_days = int(payment['metadata'].get('duration_days', 7))
             expires_at = datetime.utcnow() + timedelta(days=duration_days)
 
@@ -508,6 +533,7 @@ async def charge_recurring_payments():
 
 @dp.message(F.text, UserJourney.in_session)
 async def handle_paid_session(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     data = await state.get_data()
     messages_history = data.get("messages", [])
 
