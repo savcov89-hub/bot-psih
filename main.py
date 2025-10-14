@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from yookassa import Configuration, Payment
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -46,9 +46,12 @@ dp = Dispatcher()
 
 # --- Системные промпты ---
 PLAN_GENERATION_PROMPT = """
-Ты — опытный психолог-методолог. На основе ответов пользователя на два вопроса, составь краткий, понятный и мотивирующий план из 3-4 сессий.
+Ты — опытный психолог-методолог. На основе ответов пользователя на 5 вопросов, составь краткий, понятный и мотивирующий план из 3-4 сессий, который решает его проблему.
 Вопрос 1 (Проблема): {q1}
-Вопрос 2 (Цель): {q2}
+Вопрос 2 (Идеальный результат): {q2}
+Вопрос 3 (Что мешает): {q3}
+Вопрос 4 (Что уже пробовал): {q4}
+Вопрос 5 (Как проявляется в поведении): {q5}
 
 Твой ответ должен быть структурирован строго следующим образом:
 Заголовок: **Ваш персональный план работы**
@@ -122,6 +125,9 @@ async def is_user_subscribed(user_id: int) -> bool:
 class UserJourney(StatesGroup):
     survey_q1 = State()
     survey_q2 = State()
+    survey_q3 = State()
+    survey_q4 = State()
+    survey_q5 = State()
     plan_confirmation = State()
     waiting_for_promo = State()
     in_session = State()
@@ -130,6 +136,10 @@ class UserJourney(StatesGroup):
 agree_keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Я понимаю и согласен", callback_data="agree_pressed")]])
 plan_confirm_keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Готов(а) начать", callback_data="plan_accept")]])
 my_subscription_keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отменить автопродление", callback_data="cancel_subscription")]])
+payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="✅ Оплатить 250 ₽", callback_data="pay_subscription")],
+    [InlineKeyboardButton(text="🎁 У меня есть промокод", callback_data="enter_promo")]
+])
 
 # --- Обработчики (Handlers) ---
 @dp.message(CommandStart())
@@ -197,7 +207,7 @@ async def cancel_subscription_handler(callback_query: types.CallbackQuery):
 async def start_survey(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_reply_markup()
     await callback_query.message.answer(
-        "Отлично! Чтобы я мог составить для вас персональный план, ответьте, пожалуйста, на пару вопросов.\n\n"
+        "Отлично! Чтобы составить для вас персональный план, ответьте, пожалуйста, на 5 вопросов.\n\n"
         "**1. Опишите кратко, какая основная трудность или проблема вас сейчас беспокоит?**",
         parse_mode="Markdown"
     )
@@ -207,28 +217,43 @@ async def start_survey(callback_query: types.CallbackQuery, state: FSMContext):
 @dp.message(UserJourney.survey_q1)
 async def process_survey_q1(message: Message, state: FSMContext):
     await state.update_data(q1=message.text)
-    await message.answer(
-        "Спасибо! И второй вопрос:\n\n"
-        "**2. Какого результата вы хотели бы достичь в идеале? Что должно измениться?**",
-        parse_mode="Markdown"
-    )
+    await message.answer("**2. Какого результата вы хотели бы достичь в идеале? Что должно измениться?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q2)
 
 @dp.message(UserJourney.survey_q2)
-async def process_survey_q2_and_generate_plan(message: Message, state: FSMContext):
+async def process_survey_q2(message: Message, state: FSMContext):
     await state.update_data(q2=message.text)
+    await message.answer("**3. Как вы думаете, что вам больше всего мешает достичь этого результата?**", parse_mode="Markdown")
+    await state.set_state(UserJourney.survey_q3)
+
+@dp.message(UserJourney.survey_q3)
+async def process_survey_q3(message: Message, state: FSMContext):
+    await state.update_data(q3=message.text)
+    await message.answer("**4. Что вы уже пробовали делать для решения этой проблемы?**", parse_mode="Markdown")
+    await state.set_state(UserJourney.survey_q4)
+
+@dp.message(UserJourney.survey_q4)
+async def process_survey_q4(message: Message, state: FSMContext):
+    await state.update_data(q4=message.text)
+    await message.answer("**5. Как эта проблема проявляется в вашем поведении? (например, 'избегаю общения', 'откладываю дела')**", parse_mode="Markdown")
+    await state.set_state(UserJourney.survey_q5)
+
+@dp.message(UserJourney.survey_q5)
+async def process_survey_q5_and_generate_plan(message: Message, state: FSMContext):
+    await state.update_data(q5=message.text)
     user_data = await state.get_data()
-
+    
     thinking_message = await message.answer("Анализирую ваши ответы и составляю план... 🧠")
-
     try:
-        prompt = PLAN_GENERATION_PROMPT.format(q1=user_data['q1'], q2=user_data['q2'])
+        prompt = PLAN_GENERATION_PROMPT.format(
+            q1=user_data.get('q1'), q2=user_data.get('q2'), q3=user_data.get('q3'),
+            q4=user_data.get('q4'), q5=user_data.get('q5')
+        )
         response = await openai_client.chat.completions.create(
             model="gpt-4o", messages=[{"role": "user", "content": prompt}], temperature=0.7
         )
         plan_text = response.choices[0].message.content
 
-        # Сохраняем план в базу данных
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET session_plan = ? WHERE user_id = ?", (plan_text, message.from_user.id))
@@ -245,8 +270,19 @@ async def process_survey_q2_and_generate_plan(message: Message, state: FSMContex
         await thinking_message.edit_text("Произошла ошибка при составлении плана. Попробуйте начать заново: /start")
         await state.clear()
 
-
 @dp.callback_query(F.data == "plan_accept", UserJourney.plan_confirmation)
+async def show_payment_options(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text(
+        "Отлично! Доступ к сессиям предоставляется по подписке.\n\n"
+        "**Тариф:**\n"
+        "▫️ **250 рублей** за 7 дней доступа.\n\n"
+        "Выберите удобный для вас вариант:",
+        reply_markup=payment_keyboard,
+        parse_mode="Markdown"
+    )
+    await callback_query.answer()
+
+@dp.callback_query(F.data == "pay_subscription", UserJourney.plan_confirmation)
 async def offer_payment(callback_query: types.CallbackQuery, state: FSMContext):
     PRICE = 250.00
     payment = Payment.create({
@@ -257,11 +293,19 @@ async def offer_payment(callback_query: types.CallbackQuery, state: FSMContext):
         "save_payment_method": True,
         "metadata": {"user_id": callback_query.from_user.id, "duration_days": 7}
     }, uuid.uuid4())
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Оплатить 250 ₽", url=payment.confirmation.confirmation_url)]])
-    await callback_query.message.edit_text(
-        "**Тариф:**\n▫️ **250 рублей** за 7 дней доступа.\n\nПодписка будет продлеваться автоматически каждую неделю. Вы можете отменить её в любой момент.",
-        reply_markup=keyboard, parse_mode="Markdown"
+    
+    await callback_query.message.answer(
+        "Нажмите на кнопку ниже, чтобы перейти к оплате.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Перейти к оплате", url=payment.confirmation.confirmation_url)]])
     )
+    await callback_query.answer()
+    await state.clear()
+
+@dp.callback_query(F.data == "enter_promo", UserJourney.plan_confirmation)
+async def ask_for_promo(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text("Пожалуйста, введите ваш промокод:")
+    await state.set_state(UserJourney.waiting_for_promo)
+    await callback_query.answer()
 
 async def yookassa_webhook_handler(request):
     try:
@@ -354,7 +398,6 @@ async def handle_other_messages(message: Message, state: FSMContext):
         
         await state.set_state(UserJourney.in_session)
         
-        # Генерируем первое сообщение сессии с помощью AI
         first_message_response = await openai_client.chat.completions.create(
             model="gpt-4o", messages=[{"role": "system", "content": personalized_prompt}], temperature=0.7
         )
