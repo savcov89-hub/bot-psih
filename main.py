@@ -78,7 +78,14 @@ DB_FILE = "bot_data.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS analytics (id INTEGER PRIMARY KEY, user_id INTEGER, event_type TEXT, timestamp DATETIME)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS analytics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            timestamp DATETIME NOT NULL
+        )
+    ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -95,6 +102,17 @@ def init_db():
             is_active INTEGER DEFAULT 1
         )
     ''')
+    conn.commit()
+    conn.close()
+
+def log_event(user_id: int, event_type: str):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    timestamp = datetime.utcnow()
+    cursor.execute(
+        "INSERT INTO analytics (user_id, event_type, timestamp) VALUES (?, ?, ?)",
+        (user_id, event_type, timestamp)
+    )
     conn.commit()
     conn.close()
 
@@ -121,6 +139,50 @@ async def is_user_subscribed(user_id: int) -> bool:
                 return True
     return False
 
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ АНАЛИТИКИ ---
+def get_stats_for_period(date_filter: str):
+    """Получает статистику за указанный период."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM analytics WHERE event_type = 'start_command' {date_filter.replace('WHERE', 'AND') if date_filter else ''}")
+    start_users = cursor.fetchone()[0]
+
+    cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM analytics {date_filter}")
+    total_users = cursor.fetchone()[0]
+    
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM (
+            SELECT user_id FROM analytics 
+            {date_filter} {'AND' if date_filter else 'WHERE'} event_type = 'message_sent' 
+            GROUP BY user_id 
+            HAVING COUNT(*) > 5
+        )
+    """)
+    active_users = cursor.fetchone()[0]
+    
+    conn.close()
+    return {"start": start_users, "total": total_users, "active": active_users}
+
+def format_change(current, previous):
+    """Форматирует абсолютное и процентное изменение между двумя числами."""
+    if previous == 0:
+        if current > 0:
+            return f"\n└─ `(+{current} vs 0)`"
+        return "\n└─ `(без изменений)`"
+
+    absolute_diff = current - previous
+    
+    if absolute_diff == 0:
+        return "\n└─ `(без изменений)`"
+        
+    percent_change = (absolute_diff / previous) * 100
+    
+    sign = "+" if absolute_diff > 0 else ""
+    emoji = "📈" if absolute_diff > 0 else "📉"
+    
+    return f"\n└─ `{sign}{absolute_diff} ({sign}{percent_change:.0f}%) {emoji}`"
+
 # --- Состояния (FSM) ---
 class UserJourney(StatesGroup):
     survey_q1 = State()
@@ -140,11 +202,22 @@ payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="✅ Оплатить 250 ₽", callback_data="pay_subscription")],
     [InlineKeyboardButton(text="🎁 У меня есть промокод", callback_data="enter_promo")]
 ])
+stats_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Сегодня", callback_data="stats_today"), InlineKeyboardButton(text="Вчера", callback_data="stats_yesterday")],
+    [InlineKeyboardButton(text="7 дней", callback_data="stats_7d"), InlineKeyboardButton(text="30 дней", callback_data="stats_30d")],
+    [InlineKeyboardButton(text="Сравнить 7 дней", callback_data="stats_compare7d")],
+    [InlineKeyboardButton(text="Сравнить 30 дней", callback_data="stats_compare30d")],
+    [InlineKeyboardButton(text="За всё время", callback_data="stats_all")]
+])
+back_to_stats_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="⬅️ Назад к выбору периода", callback_data="stats_back")]
+])
 
 # --- Обработчики (Handlers) ---
 @dp.message(CommandStart())
 async def send_welcome(message: Message, state: FSMContext):
     ensure_user_exists(message.from_user.id)
+    log_event(message.from_user.id, 'start_command')
     await state.clear()
     welcome_text = (
         "👋 Здравствуйте! Я — цифровой ассистент для работы с мышлением.\n\n"
@@ -156,6 +229,81 @@ async def send_welcome(message: Message, state: FSMContext):
         await message.answer(f"{welcome_text}\n\nУ вас активна подписка. Чтобы начать сессию, просто напишите мне. Для управления подпиской используйте команду /subscription.", parse_mode="Markdown")
     else:
         await message.answer(f"{welcome_text}\n\nЧтобы начать, нажмите кнопку ниже. Также вы можете ввести промокод командой /promo.", reply_markup=agree_keyboard, parse_mode="Markdown")
+
+@dp.message(Command("stop"), StateFilter("*"))
+async def stop_session(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Сессия завершена. Чтобы начать заново, нажмите /start.")
+
+@dp.message(Command("stats"), StateFilter("*"))
+async def stats_command(message: Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        await message.answer("У вас нет доступа к этой команде.")
+        return
+    await message.answer("📊 Выберите период для отображения статистики:", reply_markup=stats_keyboard)
+
+@dp.callback_query(F.data == "stats_back")
+async def handle_stats_back(callback_query: types.CallbackQuery):
+    if str(callback_query.from_user.id) != ADMIN_ID:
+        await callback_query.answer("У вас нет доступа к этой команде.", show_alert=True)
+        return
+    await callback_query.message.edit_text(
+        "📊 Выберите период для отображения статистики:",
+        reply_markup=stats_keyboard
+    )
+    await callback_query.answer()
+
+@dp.callback_query(F.data.startswith("stats_"))
+async def handle_stats_period(callback_query: types.CallbackQuery):
+    if str(callback_query.from_user.id) != ADMIN_ID:
+        await callback_query.answer("У вас нет доступа к этой команде.", show_alert=True)
+        return
+
+    period = callback_query.data.split("_")[1]
+    stats_text = ""
+
+    if period in ["today", "yesterday", "7d", "30d", "all"]:
+        date_filter_map = {
+            "today": "WHERE DATE(timestamp) = DATE('now', 'utc')",
+            "yesterday": "WHERE DATE(timestamp) = DATE('now', '-1 day', 'utc')",
+            "7d": "WHERE DATE(timestamp) >= DATE('now', '-7 days', 'utc')",
+            "30d": "WHERE DATE(timestamp) >= DATE('now', '-30 days', 'utc')",
+            "all": ""
+        }
+        period_text_map = {
+            "today": "за сегодня", "yesterday": "за вчера", "7d": "за последние 7 дней",
+            "30d": "за последние 30 дней", "all": "за всё время"
+        }
+        
+        stats = get_stats_for_period(date_filter_map[period])
+        stats_text = (
+            f"📊 **Статистика бота {period_text_map[period]}**\n\n"
+            f"▫️ **Нажали /start:** {stats['start']} чел.\n"
+            f"▫️ **Всего уникальных:** {stats['total']} чел.\n"
+            f"▫️ **Активные (> 5):** {stats['active']} чел."
+        )
+    
+    elif period in ["compare7d", "compare30d"]:
+        days = 7 if period == "compare7d" else 30
+        
+        current_filter = f"WHERE DATE(timestamp) >= DATE('now', '-{days} days', 'utc')"
+        current_stats = get_stats_for_period(current_filter)
+
+        previous_filter = f"WHERE DATE(timestamp) >= DATE('now', '-{days*2} days', 'utc') AND DATE(timestamp) < DATE('now', '-{days} days', 'utc')"
+        previous_stats = get_stats_for_period(previous_filter)
+        
+        stats_text = (
+            f"📊 **Сравнение статистики за {days} дней**\n"
+            f"_(Последние {days} vs. Предыдущие {days})_\n\n"
+            f"▫️ **Нажали /start:** {current_stats['start']} (vs {previous_stats['start']}){format_change(current_stats['start'], previous_stats['start'])}\n"
+            f"▫️ **Всего уникальных:** {current_stats['total']} (vs {previous_stats['total']}){format_change(current_stats['total'], previous_stats['total'])}\n"
+            f"▫️ **Активные (> 5):** {current_stats['active']} (vs {previous_stats['active']}){format_change(current_stats['active'], previous_stats['active'])}"
+        )
+    
+    if stats_text:
+        await callback_query.message.edit_text(stats_text, parse_mode="Markdown", reply_markup=back_to_stats_keyboard)
+
+    await callback_query.answer()
 
 @dp.message(Command("promo"), StateFilter("*"))
 async def promo_command(message: Message, state: FSMContext):
@@ -290,7 +438,7 @@ async def offer_payment(callback_query: types.CallbackQuery, state: FSMContext):
         "confirmation": {"type": "redirect", "return_url": f"https://t.me/{(await bot.get_me()).username}"},
         "capture": True,
         "description": "Подписка на 7 дней (с автопродлением)",
-        "save_payment_method": False,
+        "save_payment_method": True,
         "metadata": {"user_id": callback_query.from_user.id, "duration_days": 7}
     }, uuid.uuid4())
     
