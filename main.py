@@ -58,21 +58,17 @@ PLAN_GENERATION_PROMPT = """
 **Сессия 3:** [Название сессии]. [Краткое описание].
 """
 
+SESSION_PROMPT = """
+Ты — AI-психолог, работающий по методу КПТ. Пользователь оплатил подписку и начинает сессию. Твоя задача — быть поддерживающим, эмпатичным и вести его по плану, который был сгенерирован ранее (но ты его не видишь). Начни с открытого вопроса, чтобы понять, с чего пользователь хочет начать сегодня. Например: "Здравствуйте! Рад начать нашу работу. Расскажите, что у вас сегодня на уме?" Веди диалог, помогая пользователю анализировать свои мысли и чувства. Будь кратким и задавай по одному вопросу за раз.
+"""
+
 # --- РАБОТА С БАЗОЙ ДАННЫХ ---
 DB_FILE = "bot_data.db"
 
 def init_db():
-    """Инициализирует базу данных и создает таблицы, если их нет."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS analytics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            event_type TEXT NOT NULL,
-            timestamp DATETIME NOT NULL
-        )
-    ''')
+    cursor.execute('CREATE TABLE IF NOT EXISTS analytics (id INTEGER PRIMARY KEY, user_id INTEGER, event_type TEXT, timestamp DATETIME)')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -92,7 +88,6 @@ def init_db():
     conn.close()
 
 def ensure_user_exists(user_id: int):
-    """Проверяет, есть ли пользователь в БД, и добавляет его, если нет."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
@@ -102,7 +97,6 @@ def ensure_user_exists(user_id: int):
     conn.close()
 
 async def is_user_subscribed(user_id: int) -> bool:
-    """Проверяет, активна ли подписка у пользователя."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT subscription_status, subscription_expires_at FROM users WHERE user_id = ?", (user_id,))
@@ -122,6 +116,7 @@ class UserJourney(StatesGroup):
     survey_q2 = State()
     plan_confirmation = State()
     waiting_for_promo = State()
+    in_session = State()
 
 # --- Клавиатуры ---
 agree_keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Я понимаю и согласен", callback_data="agree_pressed")]])
@@ -140,7 +135,7 @@ async def send_welcome(message: Message, state: FSMContext):
     )
     is_subscribed = await is_user_subscribed(message.from_user.id)
     if is_subscribed:
-        await message.answer(f"{welcome_text}\n\nУ вас активна подписка. Чтобы управлять ей, используйте команду /subscription.", parse_mode="Markdown")
+        await message.answer(f"{welcome_text}\n\nУ вас активна подписка. Чтобы начать сессию, просто напишите мне. Для управления подпиской используйте команду /subscription.", parse_mode="Markdown")
     else:
         await message.answer(f"{welcome_text}\n\nЧтобы начать, нажмите кнопку ниже. Также вы можете ввести промокод командой /promo.", reply_markup=agree_keyboard, parse_mode="Markdown")
 
@@ -156,7 +151,7 @@ async def process_promo_code(message: Message, state: FSMContext):
     cursor = conn.cursor()
     cursor.execute("SELECT duration_days FROM promo_codes WHERE code = ? AND is_active = 1", (code,))
     result = cursor.fetchone()
-    
+
     if result:
         duration_days = result[0]
         expires_at = datetime.utcnow() + timedelta(days=duration_days)
@@ -166,10 +161,10 @@ async def process_promo_code(message: Message, state: FSMContext):
         )
         cursor.execute("UPDATE promo_codes SET is_active = 0 WHERE code = ?", (code,))
         conn.commit()
-        await message.answer(f"✅ Промокод успешно активирован! Ваша подписка действительна на {duration_days} дней.")
+        await message.answer(f"✅ Промокод успешно активирован! Ваша подписка действительна на {duration_days} дней.\n\nЧтобы начать сессию, просто напишите мне любое сообщение.")
     else:
         await message.answer("❌ Промокод не найден или уже был использован.")
-    
+
     conn.close()
     await state.clear()
 
@@ -215,7 +210,7 @@ async def process_survey_q1(message: Message, state: FSMContext):
 async def process_survey_q2_and_generate_plan(message: Message, state: FSMContext):
     await state.update_data(q2=message.text)
     user_data = await state.get_data()
-    
+
     thinking_message = await message.answer("Анализирую ваши ответы и составляю план... 🧠")
 
     try:
@@ -246,7 +241,7 @@ async def offer_payment(callback_query: types.CallbackQuery, state: FSMContext):
         "confirmation": {"type": "redirect", "return_url": f"https://t.me/{(await bot.get_me()).username}"},
         "capture": True,
         "description": "Подписка на 7 дней (с автопродлением)",
-        "save_payment_method": False,
+        "save_payment_method": True, # Убедитесь, что ЮKassa включила вам рекуррентные платежи
         "metadata": {"user_id": callback_query.from_user.id, "duration_days": 7}
     }, uuid.uuid4())
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Оплатить 250 ₽", url=payment.confirmation.confirmation_url)]])
@@ -259,15 +254,15 @@ async def yookassa_webhook_handler(request):
     try:
         event_json = await request.json()
         payment = event_json.get('object')
-        
+
         if payment and payment.get('status') == 'succeeded' and payment.get('paid'):
             user_id = int(payment['metadata']['user_id'])
             duration_days = int(payment['metadata'].get('duration_days', 7))
             expires_at = datetime.utcnow() + timedelta(days=duration_days)
-            
+
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
-            
+
             payment_method_id = payment.get('payment_method', {}).get('id')
             cursor.execute(
                 "UPDATE users SET subscription_status = ?, subscription_expires_at = ?, yookassa_payment_method_id = ? WHERE user_id = ?",
@@ -275,7 +270,10 @@ async def yookassa_webhook_handler(request):
             )
             conn.commit()
             conn.close()
-            await bot.send_message(user_id, f"✅ Оплата прошла успешно! Ваша подписка активирована на {duration_days} дней.")
+            await bot.send_message(user_id,
+                f"✅ Оплата прошла успешно! Ваша подписка активирована на {duration_days} дней.\n\n"
+                "Чтобы начать нашу первую сессию, просто отправьте мне любое сообщение."
+            )
     except Exception as e:
         logging.error(f"Ошибка в обработчике ЮKassa: {e}")
     return web.Response(status=200)
@@ -285,7 +283,7 @@ async def charge_recurring_payments():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, yookassa_payment_method_id FROM users WHERE subscription_status = 'paid' AND subscription_expires_at < ? AND yookassa_payment_method_id IS NOT NULL", (datetime.utcnow(),))
-    
+
     users_to_charge = cursor.fetchall()
     conn.close()
 
@@ -303,6 +301,40 @@ async def charge_recurring_payments():
             logging.error(f"Failed to charge user {user_id}: {e}")
             await bot.send_message(user_id, "⚠️ Не удалось продлить подписку. Пожалуйста, проверьте вашу карту и оплатите вручную через команду /start.")
 
+@dp.message(F.text, UserJourney.in_session)
+async def handle_paid_session(message: Message, state: FSMContext):
+    data = await state.get_data()
+    messages_history = data.get("messages", [])
+
+    messages_history.append({"role": "user", "content": message.text})
+
+    thinking_message = await message.answer("Думаю...")
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages_history,
+            temperature=0.75,
+        )
+        gpt_answer = response.choices[0].message.content
+        messages_history.append({"role": "assistant", "content": gpt_answer})
+        await state.update_data(messages=messages_history)
+        await thinking_message.edit_text(gpt_answer)
+    except Exception as e:
+        logging.error(f"Ошибка в handle_paid_session: {e}")
+        await thinking_message.edit_text("Произошла ошибка. Попробуйте еще раз.")
+
+@dp.message()
+async def handle_other_messages(message: Message, state: FSMContext):
+    is_subscribed = await is_user_subscribed(message.from_user.id)
+    current_state = await state.get_state()
+
+    if is_subscribed and current_state is None:
+        await state.set_state(UserJourney.in_session)
+        await state.update_data(messages=[{"role": "system", "content": SESSION_PROMPT}])
+        await message.answer("Здравствуйте! Рад начать нашу работу. Расскажите, что у вас сегодня на уме?")
+    else:
+        await message.answer("Чтобы начать, пожалуйста, используйте команду /start.")
+
 # --- Функции для запуска ---
 async def on_startup_scheduler(app):
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -311,7 +343,10 @@ async def on_startup_scheduler(app):
 
 async def on_startup(bot: Bot) -> None:
     webhook_url_from_env = os.getenv("WEBHOOK_URL")
-    await bot.set_webhook(f"{webhook_url_from_env}/webhook")
+    if webhook_url_from_env:
+        await bot.set_webhook(f"{webhook_url_from_env}/webhook")
+    else:
+        logging.warning("WEBHOOK_URL не установлен.")
 
 async def on_shutdown(bot: Bot) -> None:
     await bot.delete_webhook()
@@ -326,9 +361,9 @@ def main() -> None:
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path="/webhook")
     app.router.add_post("/yookassa_webhook", yookassa_webhook_handler)
-    
+
     setup_application(app, dp, bot=bot)
-    
+
     web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
 
 if __name__ == "__main__":
