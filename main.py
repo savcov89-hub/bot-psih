@@ -321,6 +321,7 @@ async def process_survey_q4(message: Message, state: FSMContext):
     await message.answer("**5. Как эта проблема проявляется в вашем поведении? (например, 'избегаю общения', 'откладываю дела')**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q5)
 
+# ИСПРАВЛЕННЫЙ ХЕНДЛЕР ГЕНЕРАЦИИ ПЛАНА
 @dp.message(UserJourney.survey_q5)
 async def process_survey_q5_and_generate_plan(message: Message, state: FSMContext):
     await state.update_data(q5=message.text)
@@ -343,15 +344,26 @@ async def process_survey_q5_and_generate_plan(message: Message, state: FSMContex
         conn.commit()
         conn.close()
 
-        await thinking_message.edit_text(
-            f"{plan_text}\n\nЕсли вы готовы начать работу по этому плану, нажмите кнопку ниже.",
-            reply_markup=plan_confirm_keyboard, parse_mode="Markdown"
-        )
-        await state.set_state(UserJourney.plan_confirmation)
+        is_subscribed = await is_user_subscribed(message.from_user.id)
+        if is_subscribed:
+            # Если пользователь уже подписчик, просто сообщаем об успехе и возвращаем в меню
+            await thinking_message.edit_text(
+                f"{plan_text}\n\nВаш новый план сохранен! Вы вернулись в главное меню.",
+                reply_markup=main_menu_keyboard, parse_mode="Markdown"
+            )
+            await state.clear()
+        else:
+            # Если это новый пользователь, предлагаем начать
+            await thinking_message.edit_text(
+                f"{plan_text}\n\nЕсли вы готовы начать работу по этому плану, нажмите кнопку ниже.",
+                reply_markup=plan_confirm_keyboard, parse_mode="Markdown"
+            )
+            await state.set_state(UserJourney.plan_confirmation)
     except Exception as e:
         logging.error(f"Ошибка при генерации плана: {e}")
         await thinking_message.edit_text("Произошла ошибка при составлении плана. Попробуйте начать заново: /start")
         await state.clear()
+
 
 @dp.callback_query(F.data == "plan_accept", UserJourney.plan_confirmation)
 async def show_payment_options(callback_query: types.CallbackQuery, state: FSMContext):
