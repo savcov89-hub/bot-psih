@@ -72,6 +72,10 @@ SESSION_PROMPT = """
 Веди диалог, помогая пользователю анализировать свои мысли и чувства. Будь кратким и задавай по одному вопросу за раз.
 """
 
+FREE_TALK_PROMPT = """
+Ты — AI-психолог, работающий по методу КПТ. Пользователь выбрал режим 'пообщаться' и хочет отойти от плана. Просто будь поддерживающим, эмпатичным собеседником. Помоги ему разобраться в том, что его волнует прямо сейчас, задавая открытые вопросы.
+"""
+
 # --- РАБОТА С БАЗОЙ ДАННЫХ ---
 DB_FILE = "bot_data.db"
 
@@ -139,59 +143,6 @@ async def is_user_subscribed(user_id: int) -> bool:
                 return True
     return False
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ АНАЛИТИКИ ---
-def get_stats_for_period(date_filter: str):
-    """Получает статистику за указанный период."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM analytics WHERE event_type = 'start_command' {date_filter.replace('WHERE', 'AND') if date_filter else ''}")
-    start_users = cursor.fetchone()[0]
-
-    cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM analytics {date_filter}")
-    total_users = cursor.fetchone()[0]
-    
-    cursor.execute(f"""
-        SELECT COUNT(*) FROM (
-            SELECT user_id FROM analytics 
-            {date_filter} {'AND' if date_filter else 'WHERE'} event_type = 'message_sent' 
-            GROUP BY user_id 
-            HAVING COUNT(*) > 5
-        )
-    """)
-    active_users = cursor.fetchone()[0]
-
-    cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM analytics WHERE event_type = 'first_payment' {date_filter.replace('WHERE', 'AND') if date_filter else ''}")
-    first_payment_users = cursor.fetchone()[0]
-
-    cursor.execute(f"SELECT COUNT(*) FROM analytics WHERE event_type = 'recurring_payment' {date_filter.replace('WHERE', 'AND') if date_filter else ''}")
-    recurring_payments = cursor.fetchone()[0]
-    
-    conn.close()
-    return {
-        "start": start_users, "total": total_users, "active": active_users,
-        "first_payment": first_payment_users, "recurring": recurring_payments
-    }
-
-def format_change(current, previous):
-    """Форматирует абсолютное и процентное изменение между двумя числами."""
-    if previous == 0:
-        if current > 0:
-            return f"\n└─ `(+{current} vs 0)`"
-        return "\n└─ `(без изменений)`"
-
-    absolute_diff = current - previous
-    
-    if absolute_diff == 0:
-        return "\n└─ `(без изменений)`"
-        
-    percent_change = (absolute_diff / previous) * 100
-    
-    sign = "+" if absolute_diff > 0 else ""
-    emoji = "📈" if absolute_diff > 0 else "📉"
-    
-    return f"\n└─ `{sign}{absolute_diff} ({sign}{percent_change:.0f}%) {emoji}`"
-
 # --- Состояния (FSM) ---
 class UserJourney(StatesGroup):
     survey_q1 = State()
@@ -202,6 +153,7 @@ class UserJourney(StatesGroup):
     plan_confirmation = State()
     waiting_for_promo = State()
     in_session = State()
+    in_free_talk = State()
 
 # --- Клавиатуры ---
 agree_keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Я понимаю и согласен", callback_data="agree_pressed")]])
@@ -211,15 +163,11 @@ payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="✅ Оплатить 250 ₽", callback_data="pay_subscription")],
     [InlineKeyboardButton(text="🎁 У меня есть промокод", callback_data="enter_promo")]
 ])
-stats_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Сегодня", callback_data="stats_today"), InlineKeyboardButton(text="Вчера", callback_data="stats_yesterday")],
-    [InlineKeyboardButton(text="7 дней", callback_data="stats_7d"), InlineKeyboardButton(text="30 дней", callback_data="stats_30d")],
-    [InlineKeyboardButton(text="Сравнить 7 дней", callback_data="stats_compare7d")],
-    [InlineKeyboardButton(text="Сравнить 30 дней", callback_data="stats_compare30d")],
-    [InlineKeyboardButton(text="За всё время", callback_data="stats_all")]
-])
-back_to_stats_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="⬅️ Назад к выбору периода", callback_data="stats_back")]
+main_menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="▶️ Начать/Продолжить сессию по плану", callback_data="menu_start_plan_session")],
+    [InlineKeyboardButton(text="💬 Режим 'Пообщаться'", callback_data="menu_start_free_talk")],
+    [InlineKeyboardButton(text="📝 Создать новый план", callback_data="menu_create_new_plan")],
+    [InlineKeyboardButton(text="⚙️ Управление подпиской", callback_data="menu_manage_subscription")],
 ])
 
 # --- Обработчики (Handlers) ---
@@ -229,94 +177,22 @@ async def send_welcome(message: Message, state: FSMContext):
     log_event(message.from_user.id, 'start_command')
     await state.clear()
     welcome_text = (
-        "👋 Здравствуйте! Я — цифровой ассистент для работы с мышлением.\n\n"
-        "**❗️ Важное предупреждение:**\n"
-        "Я являюсь AI-алгоритмом и не могу заменить консультацию с реальным специалистом. Если вы в кризисной ситуации, пожалуйста, обратитесь за профессиональной помощью."
+        "👋 Здравствуйте! Я — цифровой ассистент для работы с мышлением."
     )
     is_subscribed = await is_user_subscribed(message.from_user.id)
     if is_subscribed:
-        await message.answer(f"{welcome_text}\n\nУ вас активна подписка. Чтобы начать сессию, просто напишите мне. Для управления подпиской используйте команду /subscription.", parse_mode="Markdown")
+        await message.answer(f"{welcome_text}\n\nДобро пожаловать в ваше личное пространство. Выберите, что бы вы хотели сделать:", reply_markup=main_menu_keyboard, parse_mode="Markdown")
     else:
         await message.answer(f"{welcome_text}\n\nЧтобы начать, нажмите кнопку ниже. Также вы можете ввести промокод командой /promo.", reply_markup=agree_keyboard, parse_mode="Markdown")
 
 @dp.message(Command("stop"), StateFilter("*"))
 async def stop_session(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Сессия завершена. Чтобы начать заново, нажмите /start.")
-
-@dp.message(Command("stats"), StateFilter("*"))
-async def stats_command(message: Message):
-    if str(message.from_user.id) != ADMIN_ID:
-        await message.answer("У вас нет доступа к этой команде.")
-        return
-    await message.answer("📊 Выберите период для отображения статистики:", reply_markup=stats_keyboard)
-
-@dp.callback_query(F.data == "stats_back")
-async def handle_stats_back(callback_query: types.CallbackQuery):
-    if str(callback_query.from_user.id) != ADMIN_ID:
-        await callback_query.answer("У вас нет доступа к этой команде.", show_alert=True)
-        return
-    await callback_query.message.edit_text(
-        "📊 Выберите период для отображения статистики:",
-        reply_markup=stats_keyboard
-    )
-    await callback_query.answer()
-
-@dp.callback_query(F.data.startswith("stats_"))
-async def handle_stats_period(callback_query: types.CallbackQuery):
-    if str(callback_query.from_user.id) != ADMIN_ID:
-        await callback_query.answer("У вас нет доступа к этой команде.", show_alert=True)
-        return
-
-    period = callback_query.data.split("_")[1]
-    stats_text = ""
-
-    if period in ["today", "yesterday", "7d", "30d", "all"]:
-        date_filter_map = {
-            "today": "WHERE DATE(timestamp) = DATE('now', 'utc')",
-            "yesterday": "WHERE DATE(timestamp) = DATE('now', '-1 day', 'utc')",
-            "7d": "WHERE DATE(timestamp) >= DATE('now', '-7 days', 'utc')",
-            "30d": "WHERE DATE(timestamp) >= DATE('now', '-30 days', 'utc')",
-            "all": ""
-        }
-        period_text_map = {
-            "today": "за сегодня", "yesterday": "за вчера", "7d": "за последние 7 дней",
-            "30d": "за последние 30 дней", "all": "за всё время"
-        }
-        
-        stats = get_stats_for_period(date_filter_map[period])
-        stats_text = (
-            f"📊 **Статистика бота {period_text_map[period]}**\n\n"
-            f"▫️ **Нажали /start:** {stats['start']} чел.\n"
-            f"▫️ **Всего уникальных:** {stats['total']} чел.\n"
-            f"▫️ **Активные (> 5 сообщ.):** {stats['active']} чел.\n\n"
-            f"💳 **Оплатили впервые:** {stats['first_payment']} чел.\n"
-            f"🔁 **Повторные оплаты:** {stats['recurring']}"
-        )
-    
-    elif period in ["compare7d", "compare30d"]:
-        days = 7 if period == "compare7d" else 30
-        
-        current_filter = f"WHERE DATE(timestamp) >= DATE('now', '-{days} days', 'utc')"
-        current_stats = get_stats_for_period(current_filter)
-
-        previous_filter = f"WHERE DATE(timestamp) >= DATE('now', '-{days*2} days', 'utc') AND DATE(timestamp) < DATE('now', '-{days} days', 'utc')"
-        previous_stats = get_stats_for_period(previous_filter)
-        
-        stats_text = (
-            f"📊 **Сравнение статистики за {days} дней**\n"
-            f"_(Последние {days} vs. Предыдущие {days})_\n\n"
-            f"▫️ **Нажали /start:** {current_stats['start']} (vs {previous_stats['start']}){format_change(current_stats['start'], previous_stats['start'])}\n"
-            f"▫️ **Всего уникальных:** {current_stats['total']} (vs {previous_stats['total']}){format_change(current_stats['total'], previous_stats['total'])}\n"
-            f"▫️ **Активные (> 5):** {current_stats['active']} (vs {previous_stats['active']}){format_change(current_stats['active'], previous_stats['active'])}\n\n"
-            f"💳 **Оплатили впервые:** {current_stats['first_payment']} (vs {previous_stats['first_payment']}){format_change(current_stats['first_payment'], previous_stats['first_payment'])}\n"
-            f"🔁 **Повторные оплаты:** {current_stats['recurring']} (vs {previous_stats['recurring']}){format_change(current_stats['recurring'], previous_stats['recurring'])}"
-        )
-    
-    if stats_text:
-        await callback_query.message.edit_text(stats_text, parse_mode="Markdown", reply_markup=back_to_stats_keyboard)
-
-    await callback_query.answer()
+    is_subscribed = await is_user_subscribed(message.from_user.id)
+    if is_subscribed:
+        await message.answer("Сессия завершена. Вы вернулись в главное меню.", reply_markup=main_menu_keyboard)
+    else:
+        await message.answer("Сессия завершена. Чтобы начать заново, нажмите /start.")
 
 @dp.message(Command("promo"), StateFilter("*"))
 async def promo_command(message: Message, state: FSMContext):
@@ -340,7 +216,7 @@ async def process_promo_code(message: Message, state: FSMContext):
         )
         cursor.execute("UPDATE promo_codes SET is_active = 0 WHERE code = ?", (code,))
         conn.commit()
-        await message.answer(f"✅ Промокод успешно активирован! Ваша подписка действительна на {duration_days} дней.\n\nЧтобы начать сессию, просто напишите мне любое сообщение.")
+        await message.answer(f"✅ Промокод успешно активирован! Ваша подписка действительна на {duration_days} дней.\n\nВы вернулись в главное меню.", reply_markup=main_menu_keyboard)
     else:
         await message.answer("❌ Промокод не найден или уже был использован.")
 
@@ -364,6 +240,52 @@ async def cancel_subscription_handler(callback_query: types.CallbackQuery):
     conn.close()
     await callback_query.message.edit_text("✅ Автопродление подписки отменено. Текущая подписка будет действовать до конца оплаченного периода.")
 
+# --- Хендлеры для кнопок главного меню ---
+@dp.callback_query(F.data == "menu_start_plan_session")
+async def start_plan_session_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text("Загружаю вашу сессию по плану...")
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT session_plan FROM users WHERE user_id = ?", (callback_query.from_user.id,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    session_plan = result[0] if result and result[0] else "План не найден. Начните с общих вопросов."
+    personalized_prompt = SESSION_PROMPT.format(plan=session_plan)
+    
+    await state.set_state(UserJourney.in_session)
+    
+    first_message_response = await openai_client.chat.completions.create(
+        model="gpt-4o", messages=[{"role": "system", "content": personalized_prompt}], temperature=0.7
+    )
+    first_message = first_message_response.choices[0].message.content
+    
+    await state.update_data(messages=[
+        {"role": "system", "content": personalized_prompt},
+        {"role": "assistant", "content": first_message}
+    ])
+    
+    await callback_query.message.answer(first_message)
+    await callback_query.answer()
+
+@dp.callback_query(F.data == "menu_start_free_talk")
+async def start_free_talk_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    await state.set_state(UserJourney.in_free_talk)
+    await state.update_data(messages=[{"role": "system", "content": FREE_TALK_PROMPT}])
+    await callback_query.message.edit_text("Режим 'Пообщаться' активирован. Можете задать любой вопрос или рассказать, что вас волнует.")
+    await callback_query.answer()
+
+@dp.callback_query(F.data == "menu_create_new_plan")
+async def create_new_plan_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    await start_survey(callback_query, state)
+
+@dp.callback_query(F.data == "menu_manage_subscription")
+async def manage_subscription_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text("Здесь вы можете управлять вашей подпиской.", reply_markup=my_subscription_keyboard)
+    await callback_query.answer()
+
+# --- Хендлеры для пути нового пользователя (опрос и оплата) ---
 @dp.callback_query(F.data == "agree_pressed")
 async def start_survey(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_reply_markup()
@@ -377,35 +299,30 @@ async def start_survey(callback_query: types.CallbackQuery, state: FSMContext):
 
 @dp.message(UserJourney.survey_q1)
 async def process_survey_q1(message: Message, state: FSMContext):
-    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q1=message.text)
     await message.answer("**2. Какого результата вы хотели бы достичь в идеале? Что должно измениться?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q2)
 
 @dp.message(UserJourney.survey_q2)
 async def process_survey_q2(message: Message, state: FSMContext):
-    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q2=message.text)
     await message.answer("**3. Как вы думаете, что вам больше всего мешает достичь этого результата?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q3)
 
 @dp.message(UserJourney.survey_q3)
 async def process_survey_q3(message: Message, state: FSMContext):
-    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q3=message.text)
     await message.answer("**4. Что вы уже пробовали делать для решения этой проблемы?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q4)
 
 @dp.message(UserJourney.survey_q4)
 async def process_survey_q4(message: Message, state: FSMContext):
-    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q4=message.text)
     await message.answer("**5. Как эта проблема проявляется в вашем поведении? (например, 'избегаю общения', 'откладываю дела')**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q5)
 
 @dp.message(UserJourney.survey_q5)
 async def process_survey_q5_and_generate_plan(message: Message, state: FSMContext):
-    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q5=message.text)
     user_data = await state.get_data()
     
@@ -502,7 +419,8 @@ async def yookassa_webhook_handler(request):
             conn.close()
             await bot.send_message(user_id,
                 f"✅ Оплата прошла успешно! Ваша подписка активирована на {duration_days} дней.\n\n"
-                "Чтобы начать нашу первую сессию по вашему персональному плану, просто отправьте мне любое сообщение."
+                "Вы вернулись в главное меню. Выберите, с чего хотите начать.",
+                reply_markup=main_menu_keyboard
             )
     except Exception as e:
         logging.error(f"Ошибка в обработчике ЮKassa: {e}")
@@ -532,6 +450,7 @@ async def charge_recurring_payments():
             await bot.send_message(user_id, "⚠️ Не удалось продлить подписку. Пожалуйста, проверьте вашу карту и оплатите вручную через команду /start.")
 
 @dp.message(F.text, UserJourney.in_session)
+@dp.message(F.text, UserJourney.in_free_talk)
 async def handle_paid_session(message: Message, state: FSMContext):
     log_event(message.from_user.id, 'message_sent')
     data = await state.get_data()
@@ -553,38 +472,6 @@ async def handle_paid_session(message: Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Ошибка в handle_paid_session: {e}")
         await thinking_message.edit_text("Произошла ошибка. Попробуйте еще раз.")
-
-@dp.message()
-async def handle_other_messages(message: Message, state: FSMContext):
-    is_subscribed = await is_user_subscribed(message.from_user.id)
-    current_state = await state.get_state()
-
-    if is_subscribed and current_state is None:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT session_plan FROM users WHERE user_id = ?", (message.from_user.id,))
-        result = cursor.fetchone()
-        conn.close()
-
-        session_plan = result[0] if result and result[0] else "План не найден. Начните с общих вопросов."
-
-        personalized_prompt = SESSION_PROMPT.format(plan=session_plan)
-        
-        await state.set_state(UserJourney.in_session)
-        
-        first_message_response = await openai_client.chat.completions.create(
-            model="gpt-4o", messages=[{"role": "system", "content": personalized_prompt}], temperature=0.7
-        )
-        first_message = first_message_response.choices[0].message.content
-        
-        await state.update_data(messages=[
-            {"role": "system", "content": personalized_prompt},
-            {"role": "assistant", "content": first_message}
-        ])
-        
-        await message.answer(first_message)
-    else:
-        await message.answer("Чтобы начать, пожалуйста, используйте команду /start.")
 
 # --- Функции для запуска ---
 async def on_startup_scheduler(app):
