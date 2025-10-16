@@ -456,7 +456,7 @@ async def offer_payment(callback_query: types.CallbackQuery, state: FSMContext):
         "confirmation": {"type": "redirect", "return_url": f"https://t.me/{(await bot.get_me()).username}"},
         "capture": True,
         "description": "Подписка на 7 дней (с автопродлением)",
-        "save_payment_method": False,
+        "save_payment_method": True,
         "metadata": {"user_id": callback_query.from_user.id, "duration_days": 7}
     }, uuid.uuid4())
     
