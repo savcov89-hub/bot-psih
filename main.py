@@ -164,7 +164,7 @@ payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🎁 У меня есть промокод", callback_data="enter_promo")]
 ])
 main_menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="▶️ Начать/Продолжить сессию по плану", callback_data="menu_start_plan_session")],
+    [InlineKeyboardButton(text="▶️ Начать сессию по плану", callback_data="menu_start_plan_session")],
     [InlineKeyboardButton(text="💬 Режим 'Пообщаться'", callback_data="menu_start_free_talk")],
     [InlineKeyboardButton(text="📝 Создать новый план", callback_data="menu_create_new_plan")],
     [InlineKeyboardButton(text="⚙️ Управление подпиской", callback_data="menu_manage_subscription")],
@@ -240,7 +240,6 @@ async def cancel_subscription_handler(callback_query: types.CallbackQuery):
     conn.close()
     await callback_query.message.edit_text("✅ Автопродление подписки отменено. Текущая подписка будет действовать до конца оплаченного периода.")
 
-# --- Хендлеры для кнопок главного меню ---
 @dp.callback_query(F.data == "menu_start_plan_session")
 async def start_plan_session_handler(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_text("Загружаю вашу сессию по плану...")
@@ -285,7 +284,6 @@ async def manage_subscription_handler(callback_query: types.CallbackQuery, state
     await callback_query.message.edit_text("Здесь вы можете управлять вашей подпиской.", reply_markup=my_subscription_keyboard)
     await callback_query.answer()
 
-# --- Хендлеры для пути нового пользователя (опрос и оплата) ---
 @dp.callback_query(F.data == "agree_pressed")
 async def start_survey(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_reply_markup()
@@ -299,31 +297,35 @@ async def start_survey(callback_query: types.CallbackQuery, state: FSMContext):
 
 @dp.message(UserJourney.survey_q1)
 async def process_survey_q1(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q1=message.text)
     await message.answer("**2. Какого результата вы хотели бы достичь в идеале? Что должно измениться?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q2)
 
 @dp.message(UserJourney.survey_q2)
 async def process_survey_q2(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q2=message.text)
     await message.answer("**3. Как вы думаете, что вам больше всего мешает достичь этого результата?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q3)
 
 @dp.message(UserJourney.survey_q3)
 async def process_survey_q3(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q3=message.text)
     await message.answer("**4. Что вы уже пробовали делать для решения этой проблемы?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q4)
 
 @dp.message(UserJourney.survey_q4)
 async def process_survey_q4(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q4=message.text)
     await message.answer("**5. Как эта проблема проявляется в вашем поведении? (например, 'избегаю общения', 'откладываю дела')**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_q5)
 
-# ИСПРАВЛЕННЫЙ ХЕНДЛЕР ГЕНЕРАЦИИ ПЛАНА
 @dp.message(UserJourney.survey_q5)
 async def process_survey_q5_and_generate_plan(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q5=message.text)
     user_data = await state.get_data()
     
@@ -346,14 +348,12 @@ async def process_survey_q5_and_generate_plan(message: Message, state: FSMContex
 
         is_subscribed = await is_user_subscribed(message.from_user.id)
         if is_subscribed:
-            # Если пользователь уже подписчик, просто сообщаем об успехе и возвращаем в меню
             await thinking_message.edit_text(
                 f"{plan_text}\n\nВаш новый план сохранен! Вы вернулись в главное меню.",
                 reply_markup=main_menu_keyboard, parse_mode="Markdown"
             )
             await state.clear()
         else:
-            # Если это новый пользователь, предлагаем начать
             await thinking_message.edit_text(
                 f"{plan_text}\n\nЕсли вы готовы начать работу по этому плану, нажмите кнопку ниже.",
                 reply_markup=plan_confirm_keyboard, parse_mode="Markdown"
@@ -363,7 +363,6 @@ async def process_survey_q5_and_generate_plan(message: Message, state: FSMContex
         logging.error(f"Ошибка при генерации плана: {e}")
         await thinking_message.edit_text("Произошла ошибка при составлении плана. Попробуйте начать заново: /start")
         await state.clear()
-
 
 @dp.callback_query(F.data == "plan_accept", UserJourney.plan_confirmation)
 async def show_payment_options(callback_query: types.CallbackQuery, state: FSMContext):
