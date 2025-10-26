@@ -428,7 +428,15 @@ async def start_free_talk_handler(callback_query: types.CallbackQuery, state: FS
 
 @dp.callback_query(F.data == "menu_create_new_plan")
 async def create_new_plan_handler(callback_query: types.CallbackQuery, state: FSMContext):
-    await start_survey(callback_query, state)
+    # Запускаем опрос
+    await callback_query.message.edit_text(
+        "Чтобы составить для вас новый персональный план, ответьте, пожалуйста, на 5 вопросов.\n\n"
+        "**1. Опишите кратко, какая основная трудность или проблема вас сейчас беспокоит?**",
+        parse_mode="Markdown"
+    )
+    await state.set_state(UserJourney.survey_q1)
+    await callback_query.answer()
+
 
 @dp.callback_query(F.data == "menu_manage_subscription")
 async def manage_subscription_handler(callback_query: types.CallbackQuery, state: FSMContext):
