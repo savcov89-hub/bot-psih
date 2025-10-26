@@ -437,7 +437,10 @@ async def start_free_talk_handler(callback_query: types.CallbackQuery, state: FS
 @dp.callback_query(F.data == "menu_create_new_plan")
 async def create_new_plan_handler(callback_query: types.CallbackQuery, state: FSMContext):
     # Запускаем опрос с первого вопроса
-    await callback_query.message.edit_text("Чтобы составить для вас новый персональный план, ответьте, пожалуйста, на несколько вопросов.\n\n**1. Давайте познакомимся. Как я могу к вам обращаться?**", parse_mode="Markdown")
+    await callback_query.message.edit_text(
+        "Чтобы составить для вас новый персональный план, ответьте, пожалуйста, на несколько вопросов.\n\n**1. Давайте познакомимся. Как я могу к вам обращаться?**",
+        parse_mode="Markdown"
+    )
     await state.set_state(UserJourney.survey_name)
     await callback_query.answer()
 
@@ -447,15 +450,14 @@ async def manage_subscription_handler(callback_query: types.CallbackQuery, state
     await callback_query.message.edit_text("Здесь вы можете управлять вашей подпиской.", reply_markup=my_subscription_keyboard)
     await callback_query.answer()
 
+# --- ПРАВИЛЬНЫЙ БЛОК ОПРОСА (6 шагов) ---
 @dp.callback_query(F.data == "agree_pressed")
-async def start_survey(callback_query: types.CallbackQuery, state: FSMContext):
+async def start_survey_q1(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_reply_markup()
-    # Начинаем опрос с вопроса об имени
     await callback_query.message.answer("Отлично! Чтобы составить для вас персональный план, ответьте, пожалуйста, на несколько вопросов.\n\n**1. Давайте познакомимся. Как я могу к вам обращаться?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_name)
     await callback_query.answer()
 
-# --- ПРАВИЛЬНЫЙ БЛОК ОПРОСА (6 шагов) ---
 @dp.message(UserJourney.survey_name)
 async def process_survey_name(message: Message, state: FSMContext):
     log_event(message.from_user.id, 'message_sent')
@@ -517,6 +519,7 @@ async def process_survey_obstacles_and_generate_plan(message: Message, state: FS
     
     thinking_message = await message.answer("Анализирую ваши ответы и составляю план... 🧠")
     try:
+        # Используем правильные ключи для промпта
         prompt = PLAN_GENERATION_PROMPT.format(
             q1=user_data.get('q_difficulty'), q2=user_data.get('q_goal'), 
             q3=user_data.get('q_obstacles'),
