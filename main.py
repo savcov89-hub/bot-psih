@@ -399,23 +399,78 @@ async def cancel_subscription_handler(callback_query: types.CallbackQuery):
     conn.close()
     await callback_query.message.edit_text("✅ Автопродление подписки отменено. Текущая подписка будет действовать до конца оплаченного периода.")
 
-# --- НОВЫЙ БЛОК ОПРОСА (6 шагов) ---
+@dp.callback_query(F.data == "menu_start_plan_session")
+async def start_plan_session_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text("Загружаю вашу сессию по плану...")
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT session_plan FROM users WHERE user_id = ?", (callback_query.from_user.id,))
+    result = cursor.fetchone()
+    conn.close()
+
+    session_plan = result[0] if result and result[0] else "План не найден. Начните с общих вопросов."
+    personalized_prompt = SESSION_PROMPT.format(plan=session_plan)
+
+    await state.set_state(UserJourney.in_session)
+
+    first_message_response = await openai_client.chat.completions.create(
+        model="gpt-4o", messages=[{"role": "system", "content": personalized_prompt}], temperature=0.7
+    )
+    first_message = first_message_response.choices[0].message.content
+
+    await state.update_data(messages=[
+        {"role": "system", "content": personalized_prompt},
+        {"role": "assistant", "content": first_message}
+    ])
+
+    await callback_query.message.answer(first_message)
+    await callback_query.answer()
+
+@dp.callback_query(F.data == "menu_start_free_talk")
+async def start_free_talk_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    await state.set_state(UserJourney.in_free_talk)
+    await state.update_data(messages=[{"role": "system", "content": FREE_TALK_PROMPT}])
+    await callback_query.message.edit_text("Режим 'Пообщаться' активирован. Можете задать любой вопрос или рассказать, что вас волнует.")
+    await callback_query.answer()
+
+@dp.callback_query(F.data == "menu_create_new_plan")
+async def create_new_plan_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    # Запускаем опрос
+    await callback_query.message.edit_text(
+        "Чтобы составить для вас новый персональный план, ответьте, пожалуйста, на 5 вопросов.\n\n"
+        "**1. Опишите кратко, какая основная трудность или проблема вас сейчас беспокоит?**",
+        parse_mode="Markdown"
+    )
+    await state.set_state(UserJourney.survey_q1)
+    await callback_query.answer()
+
+
+@dp.callback_query(F.data == "menu_manage_subscription")
+async def manage_subscription_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text("Здесь вы можете управлять вашей подпиской.", reply_markup=my_subscription_keyboard)
+    await callback_query.answer()
+
 @dp.callback_query(F.data == "agree_pressed")
-async def start_survey_q1(callback_query: types.CallbackQuery, state: FSMContext):
+async def start_survey(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_reply_markup()
-    await callback_query.message.answer("Отлично! Чтобы составить для вас персональный план, ответьте, пожалуйста, на несколько вопросов.\n\n**1. Давайте познакомимся. Как я могу к вам обращаться?**", parse_mode="Markdown")
+    await callback_query.message.answer(
+        "Отлично! Чтобы составить для вас персональный план, ответьте, пожалуйста, на несколько вопросов.\n\n**1. Давайте познакомимся. Как я могу к вам обращаться?**",
+        parse_mode="Markdown"
+    )
     await state.set_state(UserJourney.survey_name)
     await callback_query.answer()
 
 @dp.message(UserJourney.survey_name)
 async def process_survey_name(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(name=message.text)
     await message.answer("**2. Сколько вам лет?** (Это поможет мне лучше подобрать примеры и техники)", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_age)
 
 @dp.message(UserJourney.survey_age)
 async def process_survey_age(message: Message, state: FSMContext):
-    # Простая проверка на число, можно улучшить
+    log_event(message.from_user.id, 'message_sent')
     if not message.text.isdigit():
         await message.answer("Пожалуйста, введите ваш возраст цифрами.")
         return
@@ -425,12 +480,13 @@ async def process_survey_age(message: Message, state: FSMContext):
 
 @dp.message(UserJourney.survey_has_children)
 async def process_survey_has_children(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     if message.text.lower() == 'да':
         await state.update_data(has_children="Да")
         await message.answer("**Пожалуйста, укажите возраст ваших детей (можно перечислить через запятую).**", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
         await state.set_state(UserJourney.survey_children_age)
     elif message.text.lower() == 'нет':
-        await state.update_data(has_children="Нет", children_age="Нет") # Сохраняем ответ
+        await state.update_data(has_children="Нет", children_age="Нет")
         await message.answer("**4. Опишите кратко, какая основная трудность или проблема вас сейчас больше всего беспокоит в связи с разводом?**", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
         await state.set_state(UserJourney.survey_difficulty)
     else:
@@ -438,13 +494,14 @@ async def process_survey_has_children(message: Message, state: FSMContext):
 
 @dp.message(UserJourney.survey_children_age)
 async def process_survey_children_age(message: Message, state: FSMContext):
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(children_age=message.text)
     await message.answer("**4. Опишите кратко, какая основная трудность или проблема вас сейчас больше всего беспокоит в связи с разводом?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_difficulty)
 
 @dp.message(UserJourney.survey_difficulty)
 async def process_survey_difficulty(message: Message, state: FSMContext):
-    log_event(message.from_user.id, 'message_sent') # Логируем сообщения опроса
+    log_event(message.from_user.id, 'message_sent')
     await state.update_data(q_difficulty=message.text)
     await message.answer("**5. Какого результата вы хотели бы достичь в идеале с моей помощью? Что должно измениться в вашем состоянии или жизни?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_goal)
@@ -456,7 +513,6 @@ async def process_survey_goal(message: Message, state: FSMContext):
     await message.answer("**6. Как вы думаете, что вам больше всего мешает прийти к этому результату?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_obstacles)
 
-# Финальный шаг опроса и генерация плана
 @dp.message(UserJourney.survey_obstacles)
 async def process_survey_obstacles_and_generate_plan(message: Message, state: FSMContext):
     log_event(message.from_user.id, 'message_sent')
@@ -465,13 +521,10 @@ async def process_survey_obstacles_and_generate_plan(message: Message, state: FS
     
     thinking_message = await message.answer("Анализирую ваши ответы и составляю план... 🧠")
     try:
-        # Используем новые ключи для промпта
         prompt = PLAN_GENERATION_PROMPT.format(
             q1=user_data.get('q_difficulty'), q2=user_data.get('q_goal'), 
-            q3=user_data.get('q_obstacles'), 
-            # Добавим заглушки для q4 и q5, т.к. их нет в новом опросе
-            q4="Не указано", q5="Не указано", 
-            # Добавляем новые данные
+            q3=user_data.get('q_obstacles'),
+            q4="Не указано", q5="Не указано", # Заглушки, т.к. вопросы удалены
             name=user_data.get('name'), age=user_data.get('age'),
             has_children=user_data.get('has_children'), children_age=user_data.get('children_age')
         )
