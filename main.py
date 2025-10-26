@@ -436,28 +436,18 @@ async def start_free_talk_handler(callback_query: types.CallbackQuery, state: FS
 
 @dp.callback_query(F.data == "menu_create_new_plan")
 async def create_new_plan_handler(callback_query: types.CallbackQuery, state: FSMContext):
-    # Запускаем опрос
-    await callback_query.message.edit_text(
-        "Чтобы составить для вас новый персональный план, ответьте, пожалуйста, на 5 вопросов.\n\n"
-        "**1. Опишите кратко, какая основная трудность или проблема вас сейчас беспокоит?**",
-        parse_mode="Markdown"
-    )
-    await state.set_state(UserJourney.survey_q1)
-    await callback_query.answer()
-
+    await start_survey(callback_query, state) # Переход к первому вопросу
 
 @dp.callback_query(F.data == "menu_manage_subscription")
 async def manage_subscription_handler(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_text("Здесь вы можете управлять вашей подпиской.", reply_markup=my_subscription_keyboard)
     await callback_query.answer()
 
+# --- ПРАВИЛЬНЫЙ БЛОК ОПРОСА (6 шагов) ---
 @dp.callback_query(F.data == "agree_pressed")
-async def start_survey(callback_query: types.CallbackQuery, state: FSMContext):
+async def start_survey_q1(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_reply_markup()
-    await callback_query.message.answer(
-        "Отлично! Чтобы составить для вас персональный план, ответьте, пожалуйста, на несколько вопросов.\n\n**1. Давайте познакомимся. Как я могу к вам обращаться?**",
-        parse_mode="Markdown"
-    )
+    await callback_query.message.answer("Отлично! Чтобы составить для вас персональный план, ответьте, пожалуйста, на несколько вопросов.\n\n**1. Давайте познакомимся. Как я могу к вам обращаться?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_name)
     await callback_query.answer()
 
@@ -486,7 +476,7 @@ async def process_survey_has_children(message: Message, state: FSMContext):
         await message.answer("**Пожалуйста, укажите возраст ваших детей (можно перечислить через запятую).**", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
         await state.set_state(UserJourney.survey_children_age)
     elif message.text.lower() == 'нет':
-        await state.update_data(has_children="Нет", children_age="Нет")
+        await state.update_data(has_children="Нет", children_age="Нет") # Сохраняем ответ
         await message.answer("**4. Опишите кратко, какая основная трудность или проблема вас сейчас больше всего беспокоит в связи с разводом?**", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
         await state.set_state(UserJourney.survey_difficulty)
     else:
@@ -513,6 +503,7 @@ async def process_survey_goal(message: Message, state: FSMContext):
     await message.answer("**6. Как вы думаете, что вам больше всего мешает прийти к этому результату?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_obstacles)
 
+# Финальный шаг опроса и генерация плана
 @dp.message(UserJourney.survey_obstacles)
 async def process_survey_obstacles_and_generate_plan(message: Message, state: FSMContext):
     log_event(message.from_user.id, 'message_sent')
@@ -524,7 +515,7 @@ async def process_survey_obstacles_and_generate_plan(message: Message, state: FS
         prompt = PLAN_GENERATION_PROMPT.format(
             q1=user_data.get('q_difficulty'), q2=user_data.get('q_goal'), 
             q3=user_data.get('q_obstacles'),
-            q4="Не указано", q5="Не указано", # Заглушки, т.к. вопросы удалены
+            q4="Не указано", q5="Не указано", # Заглушки, т.к. вопросы удалены из промпта
             name=user_data.get('name'), age=user_data.get('age'),
             has_children=user_data.get('has_children'), children_age=user_data.get('children_age')
         )
