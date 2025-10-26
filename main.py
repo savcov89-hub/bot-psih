@@ -521,12 +521,15 @@ async def process_survey_obstacles_and_generate_plan(message: Message, state: FS
     try:
         # Используем правильные ключи для промпта
         prompt = PLAN_GENERATION_PROMPT.format(
-            q1=user_data.get('q_difficulty'), q2=user_data.get('q_goal'), 
-            q3=user_data.get('q_obstacles'),
-            q4="Не указано", q5="Не указано", # Заглушки, т.к. вопросы удалены из промпта
-            name=user_data.get('name'), age=user_data.get('age'),
-            has_children=user_data.get('has_children'), children_age=user_data.get('children_age')
+            name=user_data.get('name'),
+            age=user_data.get('age'),
+            has_children=user_data.get('has_children'),
+            children_age=user_data.get('children_age'),
+            q_difficulty=user_data.get('q_difficulty'),
+            q_goal=user_data.get('q_goal'),
+            q_obstacles=user_data.get('q_obstacles')
         )
+
         response = await openai_client.chat.completions.create(
             model="gpt-4o", messages=[{"role": "user", "content": prompt}], temperature=0.7
         )
