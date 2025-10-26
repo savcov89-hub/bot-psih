@@ -436,21 +436,26 @@ async def start_free_talk_handler(callback_query: types.CallbackQuery, state: FS
 
 @dp.callback_query(F.data == "menu_create_new_plan")
 async def create_new_plan_handler(callback_query: types.CallbackQuery, state: FSMContext):
-    await start_survey(callback_query, state) # Переход к первому вопросу
+    # Запускаем опрос с первого вопроса
+    await callback_query.message.edit_text("Чтобы составить для вас новый персональный план, ответьте, пожалуйста, на несколько вопросов.\n\n**1. Давайте познакомимся. Как я могу к вам обращаться?**", parse_mode="Markdown")
+    await state.set_state(UserJourney.survey_name)
+    await callback_query.answer()
+
 
 @dp.callback_query(F.data == "menu_manage_subscription")
 async def manage_subscription_handler(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_text("Здесь вы можете управлять вашей подпиской.", reply_markup=my_subscription_keyboard)
     await callback_query.answer()
 
-# --- ПРАВИЛЬНЫЙ БЛОК ОПРОСА (6 шагов) ---
 @dp.callback_query(F.data == "agree_pressed")
-async def start_survey_q1(callback_query: types.CallbackQuery, state: FSMContext):
+async def start_survey(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_reply_markup()
+    # Начинаем опрос с вопроса об имени
     await callback_query.message.answer("Отлично! Чтобы составить для вас персональный план, ответьте, пожалуйста, на несколько вопросов.\n\n**1. Давайте познакомимся. Как я могу к вам обращаться?**", parse_mode="Markdown")
     await state.set_state(UserJourney.survey_name)
     await callback_query.answer()
 
+# --- ПРАВИЛЬНЫЙ БЛОК ОПРОСА (6 шагов) ---
 @dp.message(UserJourney.survey_name)
 async def process_survey_name(message: Message, state: FSMContext):
     log_event(message.from_user.id, 'message_sent')
